@@ -29,12 +29,12 @@ par = {
     'num_fix_tuned'         : 4,
     'num_rule_tuned'        : 0,
     'n_val'                 : 1,
-    'include_rule_signal'   : True,
-    'n_hidden'              : [32, 32],
+    'include_rule_signal'   : False,
+    'n_hidden'              : [48, 48],
 
     # Timings and rates
     'dt'                    : 20,
-    'learning_rate'         : 4e-3,
+    'learning_rate'         : 2e-3,
     'membrane_time_constant': 100,
     'connection_prob'       : 1.0,
     'discount_rate'         : 0.,
@@ -61,7 +61,7 @@ par = {
     'weight_cost'           : 0.,
     'entropy_cost'          : 0.0001,
     'val_cost'              : 0.01,
-    'error_cost'            : 0.1,
+    'error_cost'            : 0.5,
 
     # Synaptic plasticity specs
     'tau_fast'              : 200,
@@ -71,7 +71,7 @@ par = {
 
     # Training specs
     'batch_size'            : 256,
-    'n_train_batches'       : 5000, #50000,
+    'n_train_batches'       : 50000, #50000,
 
     # Omega parameters
     'omega_c'               : 2.,
@@ -118,6 +118,7 @@ def update_dependencies():
     ###
     ### Putting together network structure
     ###
+    c = 0.001
 
     print('Using LSTM networks; setting to EI to False')
     par['EI'] = False
@@ -165,8 +166,6 @@ def update_dependencies():
     for i in range(par['num_pred_cells']):
         par['h_init'].append(0.1*np.ones((par['batch_size'], par['n_hidden'][i]), dtype=np.float32))
 
-    # Initialize weights
-    c = 0.05
 
     # Initialize RL-specific weights
     par['W_pol_out_init'] = np.float32(np.random.uniform(-c, c, size = [par['n_hidden'][-1], par['n_pol']]))
@@ -176,7 +175,7 @@ def update_dependencies():
     par['b_val_out_init'] = np.zeros((1,par['n_val']), dtype = np.float32)
 
     ### Setting up LSTM weights and biases
-    c = 0.05
+
     LSTM_var_names = ['Wf', 'Wi', 'Wo', 'Wc', 'W_pred', 'Uf', 'Ui', 'Uo', 'Uc', 'bf', 'bi', 'bo', 'bc', 'b_pred']
     for name in LSTM_var_names:
         par[name + '_init'] = []
