@@ -78,7 +78,6 @@ class Model:
         reward = tf.constant(np.zeros((par['batch_size'], par['n_val']), dtype = np.float32))
         feedback_reward = tf.constant(np.zeros((par['batch_size'], par['n_val']), dtype = np.float32))
 
-
         # Initialize state records
         self.h      = []
         self.total_pred_error = [[] for _ in range(par['num_pred_cells'])]
@@ -98,6 +97,7 @@ class Model:
                 # x is the input into the cell, y is the top-down activity projecting to cell
                 y = None if i == par['num_pred_cells']-1 else h[i+1]
                 x = stimulus_input if i == 0 else h[i-1]
+                x = tf.concat([x, reward], axis = -1)
                 h[i], c[i], error_signal = self.predictive_cell(x, y, h[i], c[i], i)
                 self.total_pred_error[i].append(tf.reduce_mean(error_signal))
 
@@ -125,6 +125,8 @@ class Model:
 
             # Record mask (outside if statement for cross-comptability)
             self.mask.append(mask)
+
+
 
 
     def predictive_cell(self, x, y, h, c, cell_num):
