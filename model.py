@@ -71,13 +71,13 @@ class Model:
         # Specify training method outputs
         self.output = []
         self.mask = []
-        self.mask.append(tf.constant(np.ones((par['batch_size'], 1), dtype = np.float32)))
         self.pol_out = self.output  # For interchangeable use
         self.val_out = []
         self.action = []
         self.reward = []
         reward = tf.constant(np.zeros((par['batch_size'], par['n_val']), dtype = np.float32))
-        self.reward.append(reward)
+        feedback_reward = tf.constant(np.zeros((par['batch_size'], par['n_val']), dtype = np.float32))
+
 
         # Initialize state records
         self.h      = []
@@ -87,7 +87,7 @@ class Model:
         h = [tf.zeros_like(par['h_init'][i]) for i in range(par['num_pred_cells'])]
         c = [tf.zeros_like(par['h_init'][i]) for i in range(par['num_pred_cells'])]
 
-        mask  = self.mask[0]
+        mask  = tf.constant(np.ones((par['batch_size'], 1), dtype = np.float32))
 
         # Loop through the neural inputs, indexed in time
         for stimulus_input, target, time_mask in zip(self.input_data, self.target_data, self.time_mask):
@@ -98,9 +98,8 @@ class Model:
                 # x is the input into the cell, y is the top-down activity projecting to cell
                 y = None if i == par['num_pred_cells']-1 else h[i+1]
                 x = stimulus_input if i == 0 else h[i-1]
-                x = tf.concat([x, reward], axis = -1)
                 h[i], c[i], error_signal = self.predictive_cell(x, y, h[i], c[i], i)
-                self.total_pred_error[i].append(tf.reduce_mean(error_signal)/par['num_pred_cells']/par['num_time_steps'])
+                self.total_pred_error[i].append(tf.reduce_mean(error_signal))
 
             # Compute outputs for action
             pol_out        = h[-1] @ self.var_dict['W_pol_out'] + self.var_dict['b_pol_out']
@@ -112,9 +111,10 @@ class Model:
             val_out        = h[-1] @ self.var_dict['W_val_out'] + self.var_dict['b_val_out']
 
             # Check for trial continuation (ends if previous reward was non-zero)
-            continue_trial = tf.cast(tf.equal(self.reward[-1], 0.), tf.float32)
+            continue_trial = tf.cast(tf.equal(reward, 0.), tf.float32)
             mask          *= continue_trial
-            reward         = tf.reduce_sum(action*target, axis=1, keep_dims=True)*mask*tf.reshape(time_mask,[par['batch_size'], 1])
+            feedback_reward = tf.reduce_sum(action*target, axis=1, keep_dims=True)
+            reward         = feedback_reward*mask*tf.reshape(time_mask,[par['batch_size'], 1])
 
             # Record RL outputs
             self.pol_out.append(pol_out)
@@ -125,10 +125,6 @@ class Model:
 
             # Record mask (outside if statement for cross-comptability)
             self.mask.append(mask)
-
-        # Reward and mask trimming where necessary
-        self.mask = self.mask[1:]
-        self.reward = self.reward[1:]
 
 
     def predictive_cell(self, x, y, h, c, cell_num):
@@ -152,7 +148,7 @@ class Model:
         # Compute hidden state
         h = o * tf.tanh(c)
 
-
+        #error_signal = pos_err + neg_err
         return h, c, error_signal
 
 
@@ -236,7 +232,7 @@ class Model:
             self.entropy_loss = -par['entropy_cost']*tf.reduce_mean(tf.reduce_sum(mask_static*self.time_mask*self.pol_out*tf.log(epsilon+self.pol_out), axis=1))
 
             # Prediction loss
-            self.pred_loss = par['error_cost'] * tf.reduce_mean(self.total_pred_error)
+            self.pred_loss = par['error_cost'] * tf.reduce_mean(tf.stack(self.total_pred_error))
 
             # Collect RL losses
             RL_loss = self.pol_loss + self.val_loss - self.entropy_loss + self.pred_loss
@@ -542,7 +538,8 @@ def reinforcement_learning(save_fn='test.pkl', gpu_id=None):
         sess.run(model.reset_prev_vars)
 
         # Begin training loop, iterating over tasks
-        for task in range(par['n_tasks']):
+        #for task in range(par['n_tasks']):
+        for task in [0,3,5,2]:
             accuracy_iter = []
             task_start_time = time.time()
 
@@ -557,29 +554,30 @@ def reinforcement_learning(save_fn='test.pkl', gpu_id=None):
 
                 # Calculate and apply gradients
                 if par['stabilization'] == 'pathint':
-                    _, _, _, pol_loss, val_loss, aux_loss, spike_loss, ent_loss, pred_loss, h_list, reward_list = \
+                    _, _, _, pol_loss, val_loss, aux_loss, spike_loss, ent_loss, pred_err, h_list, reward_list, pred_loss = \
                         sess.run([model.train_op, model.update_current_reward, model.update_small_omega, model.pol_loss, model.val_loss, \
-                        model.aux_loss, model.spike_loss, model.entropy_loss, model.pred_loss, model.h, model.reward], feed_dict = feed_dict)
+                        model.aux_loss, model.spike_loss, model.entropy_loss, model.total_pred_error, model.h, model.reward, model.pred_loss], feed_dict = feed_dict)
                     if i>0:
                         sess.run([model.update_small_omega])
                     sess.run([model.update_previous_reward])
                 elif par['stabilization'] == 'EWC':
-                    _, _, pol_loss,val_loss, aux_loss, spike_loss, ent_loss, pred_loss, h_list, reward_list = \
+                    _, _, pol_loss,val_loss, aux_loss, spike_loss, ent_loss, pred_err, h_list, reward_list = \
                         sess.run([model.train_op, model.update_current_reward, model.pol_loss, model.val_loss, \
-                        model.aux_loss, model.spike_loss, model.entropy_loss, model.pred_loss, model.h, model.reward], feed_dict = feed_dict)
+                        model.aux_loss, model.spike_loss, model.entropy_loss, model.total_pred_error, model.h, model.reward], feed_dict = feed_dict)
 
                 # Record accuracies
                 reward = np.stack(reward_list)
                 acc = np.mean(np.sum(reward>0,axis=0))
                 accuracy_iter.append(acc)
-                if i > 2000:
-                    if np.mean(accuracy_iter[-2000:]) > 0.985 or (i>25000 and np.mean(accuracy_iter[-2000:]) > 0.98):
+                if i > 5000:
+                    if np.mean(accuracy_iter[-5000:]) > 0.98 or (i>25000 and np.mean(accuracy_iter[-20:]) > 0.95):
                         print('Accuracy reached threshold')
                         break
 
                 # Display network performance
                 if i%200 == 0:
-                    print('Iter ', i, 'Task name ', name, ' accuracy', acc, ' aux loss', aux_loss, ' pred loss', pred_loss, \
+                    pe = [np.mean(pred_err[i]) for i in range(len(pred_err))]
+                    print('Iter ', i, 'Task name ', name, ' accuracy', acc, ' aux loss', aux_loss, ' pred error', pe, 'pred loss', pred_loss, \
                     'mean h', np.mean(np.stack(h_list)), 'time ', np.around(time.time() - task_start_time))
 
             # Update big omegaes, and reset other values before starting new task
@@ -604,8 +602,7 @@ def reinforcement_learning(save_fn='test.pkl', gpu_id=None):
                     name, input_data, _, mk, reward_data = stim.generate_trial(task_prime)
                     mk = mk[..., np.newaxis]
 
-                    reward_list, h = sess.run([model.reward, model.h], feed_dict = {x:input_data, target: reward_data, \
-                        gating:par['gating'][task_prime], mask:mk})
+                    reward_list, h = sess.run([model.reward, model.h], feed_dict = {x:input_data, target: reward_data, mask:mk})
 
                     reward = np.squeeze(np.stack(reward_list))
                     reward_matrix[task,task_prime] += np.mean(np.sum(reward>0,axis=0))/num_reps
