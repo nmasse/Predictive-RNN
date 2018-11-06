@@ -34,7 +34,7 @@ par = {
 
     # Timings and rates
     'dt'                    : 20,
-    'learning_rate'         : 2e-3,
+    'learning_rate'         : 4e-3,
     'membrane_time_constant': 100,
     'connection_prob'       : 1.0,
     'discount_rate'         : 0.,
@@ -61,7 +61,7 @@ par = {
     'weight_cost'           : 0.,
     'entropy_cost'          : 0.0001,
     'val_cost'              : 0.01,
-    'error_cost'            : 0.5,
+    'error_cost'            : 1.,
 
     # Synaptic plasticity specs
     'tau_fast'              : 200,
@@ -70,11 +70,11 @@ par = {
     'U_std'                 : 0.45,
 
     # Training specs
-    'batch_size'            : 256,
+    'batch_size'            : 1024,
     'n_train_batches'       : 50000, #50000,
 
     # Omega parameters
-    'omega_c'               : 2.,
+    'omega_c'               : 0.,
     'omega_xi'              : 0.001,
     'EWC_fisher_num_batches': 16,   # number of batches when calculating EWC
 
@@ -126,6 +126,9 @@ def update_dependencies():
     par['synapse_config'] = None
     par['spike_cost'] = 0.
 
+    # Number of input neurons
+    par['n_input'] = par['num_motion_tuned'] + par['num_fix_tuned'] + par['num_rule_tuned']
+
     # Number of output neurons
     par['n_output'] = par['num_motion_dirs'] + 1
     par['n_pol'] = par['num_motion_dirs'] + 1
@@ -135,9 +138,10 @@ def update_dependencies():
     par['n_cell_input'] = []
     par['n_LSTM_input'] = []
     # input into predictive cell will consist of feedforward input plus "dopamine" reward signal
-    par['n_cell_input'].append((par['num_motion_tuned'] + par['num_fix_tuned'] + par['num_rule_tuned'] + 1))
-    for i in range(1, par['num_pred_cells']):
-        par['n_cell_input'].append((par['n_hidden'][i-1] + 1))
+
+    par['extra_n_in'] = 1 + par['n_pol']
+    for i in range(par['num_pred_cells']):
+            par['n_cell_input'].append((par['n_input'] + par['extra_n_in']))
 
     for i in range(par['num_pred_cells']-1):
         par['n_LSTM_input'].append(2*par['n_cell_input'][i] + par['n_hidden'][i-1])

@@ -76,11 +76,15 @@ class Model:
         self.action = []
         self.reward = []
         reward = tf.constant(np.zeros((par['batch_size'], par['n_val']), dtype = np.float32))
+        action = tf.constant(np.zeros((par['batch_size'], par['n_pol']), dtype = np.float32))
         feedback_reward = tf.constant(np.zeros((par['batch_size'], par['n_val']), dtype = np.float32))
 
         # Initialize state records
         self.h      = []
         self.total_pred_error = [[] for _ in range(par['num_pred_cells'])]
+        self.stim_pred_error = [[] for _ in range(par['num_pred_cells'])]
+        self.rew_pred_error = [[] for _ in range(par['num_pred_cells'])]
+        self.act_pred_error = [[] for _ in range(par['num_pred_cells'])]
 
         # Initialize network state
         h = [tf.zeros_like(par['h_init'][i]) for i in range(par['num_pred_cells'])]
@@ -96,10 +100,18 @@ class Model:
                 # Compute the state of the hidden layer
                 # x is the input into the cell, y is the top-down activity projecting to cell
                 y = None if i == par['num_pred_cells']-1 else h[i+1]
-                x = stimulus_input if i == 0 else h[i-1]
-                x = tf.concat([x, reward], axis = -1)
+                x = stimulus_input if i == 0 else error_signal
+                x = tf.concat([x, reward*i**2, action*i], axis = -1)
                 h[i], c[i], error_signal = self.predictive_cell(x, y, h[i], c[i], i)
-                self.total_pred_error[i].append(tf.reduce_mean(error_signal))
+
+                es = tf.reshape(error_signal, [*x.shape,2])
+                for ind in range(2):
+                    self.stim_pred_error[i].append(tf.reduce_mean(es[:,:par['n_input'],ind]))
+                    self.rew_pred_error[i].append(100*tf.reduce_mean(es[:,par['n_input']:par['n_input']+1,ind]))
+                    self.act_pred_error[i].append(tf.reduce_mean(es[:,par['n_input']+1:par['n_input']+10,ind]))
+                    self.total_pred_error[i].append(self.stim_pred_error[i][-1] + self.rew_pred_error[i][-1] + self.act_pred_error[i][-1])
+                error_signal = tf.concat([es[:,:par['n_input'],0], es[:,:par['n_input'],1]], axis=1)
+                error_signal = tf.maximum(error_signal[:,0::2], error_signal[:,1::2])
 
             # Compute outputs for action
             pol_out        = h[-1] @ self.var_dict['W_pol_out'] + self.var_dict['b_pol_out']
@@ -113,7 +125,7 @@ class Model:
             # Check for trial continuation (ends if previous reward was non-zero)
             continue_trial = tf.cast(tf.equal(reward, 0.), tf.float32)
             mask          *= continue_trial
-            feedback_reward = tf.reduce_sum(action*target, axis=1, keep_dims=True)
+            feedback_reward = tf.reduce_sum(action*target, axis=1, keepdims=True)
             reward         = feedback_reward*mask*tf.reshape(time_mask,[par['batch_size'], 1])
 
             # Record RL outputs
@@ -556,16 +568,18 @@ def reinforcement_learning(save_fn='test.pkl', gpu_id=None):
 
                 # Calculate and apply gradients
                 if par['stabilization'] == 'pathint':
-                    _, _, _, pol_loss, val_loss, aux_loss, spike_loss, ent_loss, pred_err, h_list, reward_list, pred_loss = \
+                    _, _, _, pol_loss, val_loss, aux_loss, spike_loss, ent_loss, pred_err, stim_pred_err, rew_pred_err, act_pred_err, h_list, reward_list, pred_loss = \
                         sess.run([model.train_op, model.update_current_reward, model.update_small_omega, model.pol_loss, model.val_loss, \
-                        model.aux_loss, model.spike_loss, model.entropy_loss, model.total_pred_error, model.h, model.reward, model.pred_loss], feed_dict = feed_dict)
+                        model.aux_loss, model.spike_loss, model.entropy_loss, model.total_pred_error, model.stim_pred_error, model.rew_pred_error, model.act_pred_error, \
+                        model.h, model.reward, model.pred_loss], feed_dict = feed_dict)
                     if i>0:
                         sess.run([model.update_small_omega])
                     sess.run([model.update_previous_reward])
                 elif par['stabilization'] == 'EWC':
-                    _, _, pol_loss,val_loss, aux_loss, spike_loss, ent_loss, pred_err, h_list, reward_list = \
+                    _, _, pol_loss,val_loss, aux_loss, spike_loss, ent_loss, pred_err, stim_pred_err, rew_pred_err, act_pred_err, h_list, reward_list = \
                         sess.run([model.train_op, model.update_current_reward, model.pol_loss, model.val_loss, \
-                        model.aux_loss, model.spike_loss, model.entropy_loss, model.total_pred_error, model.h, model.reward], feed_dict = feed_dict)
+                        model.aux_loss, model.spike_loss, model.entropy_loss, model.total_pred_error, model.stim_pred_error, model.rew_pred_error, model.act_pred_error, \
+                        model.h, model.reward], feed_dict = feed_dict)
 
                 # Record accuracies
                 reward = np.stack(reward_list)
@@ -578,9 +592,17 @@ def reinforcement_learning(save_fn='test.pkl', gpu_id=None):
 
                 # Display network performance
                 if i%200 == 0:
-                    pe = [np.mean(pred_err[i]) for i in range(len(pred_err))]
-                    print('Iter ', i, 'Task name ', name, ' accuracy', acc, ' aux loss', aux_loss, ' pred error', pe, 'pred loss', pred_loss, \
-                    'mean h', np.mean(np.stack(h_list)), 'time ', np.around(time.time() - task_start_time))
+                    pe  = [float('{:7.5f}'.format(np.mean(pred_err[i]))) for i in range(len(pred_err))]
+                    spe = [float('{:7.5f}'.format(np.mean(stim_pred_err[i]))) for i in range(len(stim_pred_err))]
+                    rpe = [float('{:9.7f}'.format(np.mean(rew_pred_err[i]))) for i in range(len(rew_pred_err))]
+                    ape = [float('{:7.5f}'.format(np.mean(act_pred_err[i]))) for i in range(len(act_pred_err))]
+
+                    print('Iter: {:>5} | Task: {} | Accuracy: {:5.3f} | Aux Loss: {:7.5f} | Mean h: {:8.5f} | Time: {}'.format(\
+                        i, name, acc, aux_loss, np.mean(np.stack(h_list)), int(np.around(time.time() - task_start_time))))
+                    print('            | Pred Error: {:7.5f} | Total PE: {} | Stim PE: {} | Rew PE: {} | Act PE: {}'.format(pred_loss, pe, spe, rpe, ape))
+
+                    #print('Iter ', i, 'Task name ', name, ' accuracy', acc, ' aux loss', aux_loss, ' pred error', pe, 'pred loss', pred_loss, \
+                    #'mean h', np.mean(np.stack(h_list)), 'time ', np.around(time.time() - task_start_time))
 
             # Update big omegaes, and reset other values before starting new task
             if par['stabilization'] == 'pathint':
@@ -693,7 +715,7 @@ def append_model_performance(model_performance, reward, entropy_loss, pol_loss, 
 def generate_placeholders():
 
     mask = tf.placeholder(tf.float32, shape=[par['num_time_steps'], par['batch_size'], 1])
-    x = tf.placeholder(tf.float32, shape=[par['num_time_steps'], par['batch_size'], par['n_cell_input'][0]-1])  # input data
+    x = tf.placeholder(tf.float32, shape=[par['num_time_steps'], par['batch_size'], par['n_input']])  # input data
     target = tf.placeholder(tf.float32, shape=[par['num_time_steps'], par['batch_size'], par['n_pol']])  # input data
     pred_val = tf.placeholder(tf.float32, shape=[par['num_time_steps'], par['batch_size'], par['n_val'], ])
     actual_action = tf.placeholder(tf.float32, shape=[par['num_time_steps'], par['batch_size'], par['n_pol']])

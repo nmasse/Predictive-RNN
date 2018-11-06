@@ -9,7 +9,7 @@ class MultiStimulus:
     def __init__(self):
 
         # Shape configuration
-        self.input_shape    = [par['num_time_steps'], par['batch_size'],par['n_cell_input'][0] - 1 ]
+        self.input_shape    = [par['num_time_steps'], par['batch_size'],par['n_input']]
         self.output_shape   = [par['num_time_steps'], par['batch_size'],par['n_output'] ]
         self.stimulus_shape = [par['num_time_steps'], par['batch_size'],par['num_motion_tuned'] ]
         self.response_shape = [par['num_time_steps'], par['batch_size'],par['num_motion_dirs'] ]
