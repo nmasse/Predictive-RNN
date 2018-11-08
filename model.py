@@ -6,6 +6,9 @@ import numpy as np
 import pickle
 import os, sys, time
 from itertools import product
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 # Model modules
 from parameters import *
@@ -92,6 +95,8 @@ class Model:
 
         mask  = tf.constant(np.ones((par['batch_size'], 1), dtype = np.float32))
 
+        self.expected_reward_vector = []
+        self.actual_reward_vector = []
         # Loop through the neural inputs, indexed in time
         for stimulus_input, target, time_mask in zip(self.input_data, self.target_data, self.time_mask):
 
@@ -101,17 +106,19 @@ class Model:
                 # x is the input into the cell, y is the top-down activity projecting to cell
                 y = None if i == par['num_pred_cells']-1 else h[i+1]
                 x = stimulus_input if i == 0 else error_signal
-                x = tf.concat([x, reward*i**2, action*i], axis = -1)
+                x = tf.concat([x, reward*i, action*i], axis = -1)
                 h[i], c[i], error_signal = self.predictive_cell(x, y, h[i], c[i], i)
 
-                es = tf.reshape(error_signal, [*x.shape,2])
+                es = tf.stack([error_signal[:,:par['n_input']+10], error_signal[:,par['n_input']+10:]], axis=-1)
                 for ind in range(2):
                     self.stim_pred_error[i].append(tf.reduce_mean(es[:,:par['n_input'],ind]))
-                    self.rew_pred_error[i].append(100*tf.reduce_mean(es[:,par['n_input']:par['n_input']+1,ind]))
+                    self.rew_pred_error[i].append(tf.reduce_mean(es[:,par['n_input']:par['n_input']+1,ind]))
                     self.act_pred_error[i].append(tf.reduce_mean(es[:,par['n_input']+1:par['n_input']+10,ind]))
                     self.total_pred_error[i].append(self.stim_pred_error[i][-1] + self.rew_pred_error[i][-1] + self.act_pred_error[i][-1])
                 error_signal = tf.concat([es[:,:par['n_input'],0], es[:,:par['n_input'],1]], axis=1)
                 error_signal = tf.maximum(error_signal[:,0::2], error_signal[:,1::2])
+
+            self.actual_reward_vector.append(reward)
 
             # Compute outputs for action
             pol_out        = h[-1] @ self.var_dict['W_pol_out'] + self.var_dict['b_pol_out']
@@ -138,12 +145,16 @@ class Model:
             # Record mask (outside if statement for cross-comptability)
             self.mask.append(mask)
 
-
+        self.expected_reward_vector = tf.stack(self.expected_reward_vector, axis=0)
+        self.actual_reward_vector = tf.stack(self.actual_reward_vector, axis=0)
 
 
     def predictive_cell(self, x, y, h, c, cell_num):
         """ Using the appropriate recurrent cell
             architecture, compute the hidden state """
+
+        if cell_num == 1:
+            self.expected_reward_vector.append((h @ self.var_dict['W_pred'][cell_num] + self.var_dict['b_pred'][cell_num])[:,par['n_input']:par['n_input']+1])
 
         pos_err = tf.nn.relu(x - h @ self.var_dict['W_pred'][cell_num] - self.var_dict['b_pred'][cell_num])
         neg_err = tf.nn.relu(h @ self.var_dict['W_pred'][cell_num] + self.var_dict['b_pred'][cell_num] - x)
@@ -568,10 +579,11 @@ def reinforcement_learning(save_fn='test.pkl', gpu_id=None):
 
                 # Calculate and apply gradients
                 if par['stabilization'] == 'pathint':
-                    _, _, _, pol_loss, val_loss, aux_loss, spike_loss, ent_loss, pred_err, stim_pred_err, rew_pred_err, act_pred_err, h_list, reward_list, pred_loss = \
+                    _, _, _, pol_loss, val_loss, aux_loss, spike_loss, ent_loss, pred_err, stim_pred_err, \
+                        rew_pred_err, act_pred_err, h_list, reward_list, pred_loss, expected_reward, actual_reward = \
                         sess.run([model.train_op, model.update_current_reward, model.update_small_omega, model.pol_loss, model.val_loss, \
                         model.aux_loss, model.spike_loss, model.entropy_loss, model.total_pred_error, model.stim_pred_error, model.rew_pred_error, model.act_pred_error, \
-                        model.h, model.reward, model.pred_loss], feed_dict = feed_dict)
+                        model.h, model.reward, model.pred_loss, model.expected_reward_vector, model.actual_reward_vector], feed_dict = feed_dict)
                     if i>0:
                         sess.run([model.update_small_omega])
                     sess.run([model.update_previous_reward])
@@ -592,6 +604,22 @@ def reinforcement_learning(save_fn='test.pkl', gpu_id=None):
 
                 # Display network performance
                 if i%200 == 0:
+
+                    fig, ax = plt.subplots(1,3, figsize=[24,8])
+                    im0 = ax[0].imshow(expected_reward[:,:,0], aspect='auto', clim=(-np.abs(expected_reward).max(), np.abs(expected_reward).max()))
+                    ax[0].set_title('Expected Reward')
+                    im1 = ax[1].imshow(actual_reward[:,:,0], aspect='auto', clim=(par['fix_break_penalty'], par['correct_choice_reward']))
+                    ax[1].set_title('Actual Reward')
+                    diff = expected_reward[:,:,0] - actual_reward[:,:,0]
+                    im2 = ax[2].imshow(diff, aspect='auto', clim=(-np.abs(diff).max(), np.abs(diff).max()))
+                    ax[2].set_title('Expected - Actual')
+                    fig.colorbar(im0, ax=ax[0], orientation='horizontal', ticks=[-np.abs(expected_reward).max(),0,np.abs(expected_reward).max()])
+                    fig.colorbar(im1, ax=ax[1], orientation='horizontal', ticks=[par['fix_break_penalty'],0,par['correct_choice_reward']])
+                    fig.colorbar(im2, ax=ax[2], orientation='horizontal', ticks=[-np.abs(diff).max(),0,np.abs(diff).max()])
+                    plt.savefig('./savedir/reward_task{}_iter{}_v2.png'.format(task, i))
+                    plt.clf()
+                    plt.close()
+
                     pe  = [float('{:7.5f}'.format(np.mean(pred_err[i]))) for i in range(len(pred_err))]
                     spe = [float('{:7.5f}'.format(np.mean(stim_pred_err[i]))) for i in range(len(stim_pred_err))]
                     rpe = [float('{:9.7f}'.format(np.mean(rew_pred_err[i]))) for i in range(len(rew_pred_err))]
